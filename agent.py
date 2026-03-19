@@ -5,6 +5,10 @@ import ast
 import json
 from openai import OpenAI
 from scraper import WebScraper
+from dotenv import load_dotenv
+
+# Загружаем переменные из .env файла
+load_dotenv()
 
 # 1. Загружаем системный промпт (наш "идеальный" CoT промпт)
 def load_prompt() -> str:
