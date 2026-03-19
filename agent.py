@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field, field_validator, ValidationError
 import ast
 import json
 from openai import OpenAI
+from scraper import WebScraper
 
 # 1. Загружаем системный промпт (наш "идеальный" CoT промпт)
 def load_prompt() -> str:
@@ -43,6 +44,7 @@ class VyudAgent:
         
         self.client = OpenAI(api_key=self.api_key)
         self.system_prompt = load_prompt()
+        self.scraper = WebScraper()
 
     def _parse_llm_json(self, llm_response: str) -> Optional[CompanyEnrichment]:
         """
@@ -76,10 +78,22 @@ class VyudAgent:
             print(f"\n❌ Ошибка парсинга: {str(e)}")
             return None
 
-    def analyze_company_text(self, text: str) -> Optional[CompanyEnrichment]:
+    def analyze_company(self, text: str = None, url: str = None) -> Optional[CompanyEnrichment]:
         """
         Отправляет текст в OpenAI и возвращает структурированный объект.
+        Можно передать либо готовый текст (text), либо ссылку на сайт (url).
         """
+        if url:
+            print(f"🕵️‍♂️ Извлекаем данные с сайта: {url}")
+            text = self.scraper.scrape_url(url)
+            if not text:
+                print("❌ Не удалось получить текст с сайта.")
+                return None
+                
+        if not text:
+            print("❌ Ошибка: Не передан ни текст, ни URL.")
+            return None
+            
         print(f"🔍 Анализирую текст ({len(text)} символов)...")
         
         try:
@@ -108,19 +122,12 @@ if __name__ == "__main__":
     # Для теста подставьте свой ключ сюда или в переменную окружения OPENAI_API_KEY
     # os.environ["OPENAI_API_KEY"] = "sk-proj-..."
     
-    # Имитация текста "About Us", спарсенного с сайта
-    sample_website_text = '''
-    Welcome to DataFlow Logistics! We are a leading supply chain optimization company.
-    We believe in data-driven decisions. Our team uses powerful tools like AWS for scalable 
-    infrastructure and we have recently integrated our custom tracking dashboard with Salesforce 
-    to better manage our enterprise client relationships. We are actively hiring Python developers 
-    to improve our internal routing algorithms.
-    '''
-    
-    # Попробуем запустить агента (если нет ключа, он выдаст понятную ошибку)
     try:
         agent = VyudAgent()
-        result = agent.analyze_company_text(sample_website_text)
+        
+        # Теперь мы можем передавать просто URL!
+        target_url = "https://www.hubspot.com/our-story"
+        result = agent.analyze_company(url=target_url)
         
         if result:
             print("\n" + "="*40)
