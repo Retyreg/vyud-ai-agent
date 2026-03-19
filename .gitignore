@@ -5,3 +5,5 @@ __pycache__/
 .venv/
 venv/
 .DS_Storeresults.csv
+results_ui.csv
+leads_ui.txt
