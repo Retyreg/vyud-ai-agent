@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from typing import Optional, List
 import os
 from dotenv import load_dotenv
+import resend
 
 from agent import VyudAgent
 from writer import VyudWriter
@@ -11,6 +12,7 @@ from writer import VyudWriter
 load_dotenv()
 
 app = FastAPI(title="VYUD AI API", version="1.0.0")
+resend.api_key = os.getenv("RESEND_API_KEY")
 
 # Настройка CORS для работы с Next.js
 app.add_middleware(
@@ -23,11 +25,6 @@ app.add_middleware(
 
 # Простая защита API ключом (можно вынести в .env)
 API_SECRET_KEY = os.getenv("VYUD_API_SECRET", "vyud-secret-key-2026")
-
-def verify_api_key(x_api_key: str = Header(...)):
-    if x_api_key != API_SECRET_KEY:
-        raise HTTPException(status_code=403, detail="Invalid API Key")
-    return x_api_key
 
 # Модели данных
 class AnalyzeRequest(BaseModel):
@@ -42,6 +39,11 @@ class AnalyzeResponse(BaseModel):
     analysis_log: str
     email_draft: str
 
+class SendEmailRequest(BaseModel):
+    to_email: str
+    subject: str
+    body: str
+
 # Инициализация сервисов
 agent = VyudAgent()
 writer = VyudWriter()
@@ -51,16 +53,17 @@ async def health_check():
     return {"status": "online", "message": "VYUD AI API is running"}
 
 @app.post("/api/analyze", response_model=AnalyzeResponse)
-async def analyze_company(request: AnalyzeRequest, api_key: str = Depends(verify_api_key)):
-    """
-    Эндпоинт для полного цикла: Скрапинг -> Анализ -> Генерация письма.
-    """
+async def analyze_company(request: AnalyzeRequest, x_api_key: str = Header(...)):
+    # Проверка ключа
+    if x_api_key != API_SECRET_KEY:
+        raise HTTPException(status_code=403, detail="Invalid API Key")
+
     try:
         # 1. Анализ через VyudAgent
         result = agent.analyze_company(url=request.url)
         
         if not result:
-            raise HTTPException(status_code=400, detail="Не удалось проанализировать сайт. Проверьте URL.")
+            raise HTTPException(status_code=400, detail="Не удалось получить данные с сайта. Возможно, он заблокирован для ботов.")
         
         # 2. Генерация письма через VyudWriter
         email_draft = writer.generate_email(result.model_dump())
@@ -74,7 +77,35 @@ async def analyze_company(request: AnalyzeRequest, api_key: str = Depends(verify
             analysis_log=result.analysis_log,
             email_draft=email_draft
         )
+    except HTTPException as he:
+        raise he
     except Exception as e:
+        print(f"💥 Системная ошибка: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Внутренняя ошибка сервера: {str(e)}")
+
+@app.post("/api/send-email")
+async def send_email(request: SendEmailRequest, x_api_key: str = Header(...)):
+    """
+    Эндпоинт для отправки письма через Resend.
+    """
+    if x_api_key != API_SECRET_KEY:
+        raise HTTPException(status_code=403, detail="Invalid API Key")
+
+    try:
+        if not resend.api_key:
+             raise HTTPException(status_code=500, detail="RESEND_API_KEY не настроен на сервере")
+
+        params = {
+            "from": "VYUD AI <onboarding@resend.dev>", # Позже заменим на твой домен
+            "to": [request.to_email],
+            "subject": request.subject,
+            "text": request.body,
+        }
+
+        email = resend.Emails.send(params)
+        return {"success": True, "email_id": email.get("id")}
+    except Exception as e:
+        print(f"💥 Ошибка отправки почты: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
