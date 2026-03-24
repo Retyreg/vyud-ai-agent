@@ -17,18 +17,25 @@ resend.api_key = os.getenv("RESEND_API_KEY")
 # Настройка CORS для работы с Next.js
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # В продакшене лучше указать конкретный домен лендинга
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Простая защита API ключом (можно вынести в .env)
+# Простая защита API ключом
 API_SECRET_KEY = os.getenv("VYUD_API_SECRET", "vyud-secret-key-2026")
 
 # Модели данных
 class AnalyzeRequest(BaseModel):
     url: str
+    target_role: Optional[str] = "Decision Maker"
+
+class DecisionMaker(BaseModel):
+    name: Optional[str] = "Коллега"
+    title: Optional[str]
+    linkedin_url: Optional[str]
+    relevance_reason: str
 
 class AnalyzeResponse(BaseModel):
     company_name: Optional[str]
@@ -38,6 +45,7 @@ class AnalyzeResponse(BaseModel):
     confidence_score: float
     analysis_log: str
     email_draft: str
+    decision_maker: Optional[DecisionMaker] = None
 
 class SendEmailRequest(BaseModel):
     to_email: str
@@ -54,19 +62,30 @@ async def health_check():
 
 @app.post("/api/analyze", response_model=AnalyzeResponse)
 async def analyze_company(request: AnalyzeRequest, x_api_key: str = Header(...)):
-    # Проверка ключа
     if x_api_key != API_SECRET_KEY:
         raise HTTPException(status_code=403, detail="Invalid API Key")
 
     try:
-        # 1. Анализ через VyudAgent
+        # 1. Анализ компании через VyudAgent
         result = agent.analyze_company(url=request.url)
         
         if not result:
-            raise HTTPException(status_code=400, detail="Не удалось получить данные с сайта. Возможно, он заблокирован для ботов.")
+            raise HTTPException(status_code=400, detail="Не удалось получить данные с сайта.")
         
-        # 2. Генерация письма через VyudWriter
-        email_draft = writer.generate_email(result.model_dump())
+        # 2. Подготовка информации об ЛПР (для MVP - умная ссылка на поиск)
+        # В следующей итерации сюда добавится реальный поиск через Serper API
+        dm_info = DecisionMaker(
+            name="Коллега",
+            title=request.target_role,
+            linkedin_url=f"https://www.linkedin.com/search/results/people/?keywords={request.target_role.replace(' ', '%20')}%20{result.company_name.replace(' ', '%20')}",
+            relevance_reason=f"Отвечает за направление {request.target_role} в компании {result.company_name}"
+        )
+        
+        # 3. Генерация письма через VyudWriter с учетом роли
+        enrichment_data = result.model_dump()
+        enrichment_data["target_role"] = request.target_role
+        
+        email_draft = writer.generate_email(enrichment_data)
         
         return AnalyzeResponse(
             company_name=result.company_name,
@@ -75,28 +94,26 @@ async def analyze_company(request: AnalyzeRequest, x_api_key: str = Header(...))
             crm_detected=result.crm_detected,
             confidence_score=result.confidence_score,
             analysis_log=result.analysis_log,
-            email_draft=email_draft
+            email_draft=email_draft,
+            decision_maker=dm_info
         )
     except HTTPException as he:
         raise he
     except Exception as e:
         print(f"💥 Системная ошибка: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Внутренняя ошибка сервера: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/send-email")
 async def send_email(request: SendEmailRequest, x_api_key: str = Header(...)):
-    """
-    Эндпоинт для отправки письма через Resend.
-    """
     if x_api_key != API_SECRET_KEY:
         raise HTTPException(status_code=403, detail="Invalid API Key")
 
     try:
         if not resend.api_key:
-             raise HTTPException(status_code=500, detail="RESEND_API_KEY не настроен на сервере")
+             raise HTTPException(status_code=500, detail="RESEND_API_KEY не настроен")
 
         params = {
-            "from": "VYUD AI <onboarding@resend.dev>", # Позже заменим на твой домен
+            "from": "VYUD AI <onboarding@resend.dev>",
             "to": [request.to_email],
             "subject": request.subject,
             "text": request.body,
@@ -105,7 +122,6 @@ async def send_email(request: SendEmailRequest, x_api_key: str = Header(...)):
         email = resend.Emails.send(params)
         return {"success": True, "email_id": email.get("id")}
     except Exception as e:
-        print(f"💥 Ошибка отправки почты: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
