@@ -9,13 +9,14 @@ import resend
 from agent import VyudAgent
 from writer import VyudWriter
 from searcher import PersonSearcher
+from apollo_client import ApolloClient
 
 load_dotenv()
 
 app = FastAPI(title="VYUD AI API", version="1.0.0")
 resend.api_key = os.getenv("RESEND_API_KEY")
 
-# Настройка CORS для работы с Next.js
+# Настройка CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -36,6 +37,7 @@ class DecisionMaker(BaseModel):
     name: Optional[str] = "Коллега"
     title: Optional[str]
     linkedin_url: Optional[str]
+    email: Optional[str] = None
     relevance_reason: str
 
 class AnalyzeResponse(BaseModel):
@@ -56,7 +58,8 @@ class SendEmailRequest(BaseModel):
 # Инициализация сервисов
 agent = VyudAgent()
 writer = VyudWriter()
-searcher = PersonSearcher(openai_client=agent.client) # Передаем клиент агента
+searcher = PersonSearcher(openai_client=agent.client)
+apollo = ApolloClient()
 
 @app.get("/")
 async def health_check():
@@ -68,31 +71,41 @@ async def analyze_company(request: AnalyzeRequest, x_api_key: str = Header(...))
         raise HTTPException(status_code=403, detail="Invalid API Key")
 
     try:
-        # 1. Анализ компании через VyudAgent
+        # 1. Анализ компании
         result = agent.analyze_company(url=request.url)
-        
         if not result:
             raise HTTPException(status_code=400, detail="Не удалось получить данные с сайта.")
         
-        # 2. Умный поиск ЛПР через Serper + LLM Verification
-        real_dm = searcher.find_decision_maker(
-            result.company_name, 
-            request.target_role, 
-            company_context=result.analysis_log
-        )
+        # 2. Поиск ЛПР (Гибридная стратегия)
+        dm_info = None
         
-        if real_dm:
-            dm_info = DecisionMaker(**real_dm)
-        else:
-            # Fallback к ссылке на поиск, если ИИ никого не одобрил
+        # Пытаемся через Apollo (точность 95%)
+        print(f"🕵️‍♂️ Пытаюсь найти человека через Apollo для {request.url}...")
+        apollo_res = apollo.search_person(request.url, request.target_role)
+        if apollo_res:
+            dm_info = DecisionMaker(**apollo_res)
+        
+        # Fallback: Умный поиск через Google + LLM
+        if not dm_info:
+            print("⚠️ Apollo не нашел сотрудника. Запускаю Agentic Search...")
+            real_dm = searcher.find_decision_maker(
+                result.company_name, 
+                request.target_role, 
+                company_context=result.analysis_log
+            )
+            if real_dm:
+                dm_info = DecisionMaker(**real_dm)
+
+        # Крайний случай (все сервисы провалились)
+        if not dm_info:
             dm_info = DecisionMaker(
                 name="Коллега",
                 title=request.target_role,
                 linkedin_url=f"https://www.linkedin.com/search/results/people/?keywords={request.target_role.replace(' ', '%20')}%20{result.company_name.replace(' ', '%20')}",
-                relevance_reason=f"ИИ не нашел точного совпадения, требуется ручная проверка"
+                relevance_reason=f"Автоматический поиск не дал результатов, воспользуйтесь ссылкой"
             )
         
-        # 3. Генерация письма через VyudWriter с учетом реального имени ЛПР
+        # 3. Генерация письма
         enrichment_data = result.model_dump()
         enrichment_data["target_role"] = request.target_role
         enrichment_data["dm_name"] = dm_info.name
@@ -109,28 +122,23 @@ async def analyze_company(request: AnalyzeRequest, x_api_key: str = Header(...))
             email_draft=email_draft,
             decision_maker=dm_info
         )
-    except HTTPException as he:
-        raise he
     except Exception as e:
-        print(f"💥 Системная ошибка: {str(e)}")
+        print(f"💥 Ошибка: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/send-email")
 async def send_email(request: SendEmailRequest, x_api_key: str = Header(...)):
     if x_api_key != API_SECRET_KEY:
         raise HTTPException(status_code=403, detail="Invalid API Key")
-
     try:
         if not resend.api_key:
              raise HTTPException(status_code=500, detail="RESEND_API_KEY не настроен")
-
         params = {
             "from": "VYUD AI <onboarding@resend.dev>",
             "to": [request.to_email],
             "subject": request.subject,
             "text": request.body,
         }
-
         email = resend.Emails.send(params)
         return {"success": True, "email_id": email.get("id")}
     except Exception as e:
