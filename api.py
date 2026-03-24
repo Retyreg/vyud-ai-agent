@@ -56,7 +56,7 @@ class SendEmailRequest(BaseModel):
 # Инициализация сервисов
 agent = VyudAgent()
 writer = VyudWriter()
-searcher = PersonSearcher()
+searcher = PersonSearcher(openai_client=agent.client) # Передаем клиент агента
 
 @app.get("/")
 async def health_check():
@@ -74,18 +74,22 @@ async def analyze_company(request: AnalyzeRequest, x_api_key: str = Header(...))
         if not result:
             raise HTTPException(status_code=400, detail="Не удалось получить данные с сайта.")
         
-        # 2. Реальный поиск ЛПР через Serper API
-        real_dm = searcher.find_decision_maker(result.company_name, request.target_role)
+        # 2. Умный поиск ЛПР через Serper + LLM Verification
+        real_dm = searcher.find_decision_maker(
+            result.company_name, 
+            request.target_role, 
+            company_context=result.analysis_log
+        )
         
         if real_dm:
             dm_info = DecisionMaker(**real_dm)
         else:
-            # Fallback к умной ссылке, если поиск не дал результатов
+            # Fallback к ссылке на поиск, если ИИ никого не одобрил
             dm_info = DecisionMaker(
                 name="Коллега",
                 title=request.target_role,
                 linkedin_url=f"https://www.linkedin.com/search/results/people/?keywords={request.target_role.replace(' ', '%20')}%20{result.company_name.replace(' ', '%20')}",
-                relevance_reason=f"Ручной поиск в LinkedIn по запросу {request.target_role}"
+                relevance_reason=f"ИИ не нашел точного совпадения, требуется ручная проверка"
             )
         
         # 3. Генерация письма через VyudWriter с учетом реального имени ЛПР
