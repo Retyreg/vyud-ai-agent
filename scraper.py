@@ -4,53 +4,71 @@ from urllib.parse import urlparse
 import re
 
 class WebScraper:
-    def __init__(self, timeout: int = 10):
+    def __init__(self, timeout: int = 15):
         self.timeout = timeout
-        # Маскируемся под обычный браузер, чтобы сайты не блокировали нас сразу
+        # Тщательно маскируемся под реального пользователя (Chrome/Mac)
         self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Referer': 'https://www.google.com/',
+            'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+            'Sec-Ch-Ua-Mobile': '?0',
+            'Sec-Ch-Ua-Platform': '"macOS"',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'cross-site',
+            'Upgrade-Insecure-Requests': '1',
+            'Cache-Control': 'max-age=0'
         }
 
     def _clean_text(self, text: str) -> str:
         """Очищает текст от лишних пробелов, пустых строк и переносов."""
         # Заменяем множественные пробелы и переносы строк на одинарные
-        cleaned = re.sub(r'\s+', ' ', text)
+        cleaned = re.sub(r'[\r\n\s\t]+', ' ', text)
         return cleaned.strip()
 
     def scrape_url(self, url: str) -> str:
         """
-        Скачивает HTML страницы и извлекает только полезный текст,
-        удаляя скрипты, стили, меню и футеры (по возможности).
+        Скачивает HTML страницы и извлекает только полезный текст.
         """
-        # Добавляем схему, если ее нет
         if not url.startswith('http://') and not url.startswith('https://'):
             url = 'https://' + url
 
         try:
             print(f"🌐 Скрапинг URL: {url}")
-            response = requests.get(url, headers=self.headers, timeout=self.timeout)
+            # Создаем сессию, чтобы сохранять куки (некоторые сайты этого требуют)
+            session = requests.Session()
+            response = session.get(url, headers=self.headers, timeout=self.timeout)
+            
+            # Проверка на код блокировки
+            if response.status_code == 403:
+                print(f"❌ Доступ к {url} запрещен (403 Forbidden).")
+                return ""
+            
             response.raise_for_status()
 
             soup = BeautifulSoup(response.text, 'html.parser')
 
             # 1. Удаляем весь "мусор": скрипты, стили, svg, невидимые элементы
-            for element in soup(["script", "style", "noscript", "svg", "header", "footer", "nav"]):
+            for element in soup(["script", "style", "noscript", "svg", "header", "footer", "nav", "aside"]):
                 element.extract()
 
             # 2. Извлекаем текст
-            # get_text(separator=' ') вставляет пробел между тегами
             raw_text = soup.get_text(separator=' ')
 
             # 3. Чистим текст
             cleaned_text = self._clean_text(raw_text)
             
-            # Ограничим размер текста, чтобы не выйти за лимиты токенов LLM
-            # ~10 000 символов (около 2500 токенов) обычно достаточно для About Us
+            # Если текст слишком короткий, вероятно, скрапинг не удался
+            if len(cleaned_text) < 50:
+                print(f"⚠️ Извлеченный текст слишком короткий ({len(cleaned_text)} симв.). Сайт может быть динамическим или заблокированным.")
+                return ""
+
             max_chars = 10000
             if len(cleaned_text) > max_chars:
-                print(f"⚠️ Текст слишком длинный ({len(cleaned_text)} символов). Обрезаем до {max_chars}.")
+                print(f"⚠️ Текст слишком длинный ({len(cleaned_text)} символов). Обрезаем.")
                 cleaned_text = cleaned_text[:max_chars]
 
             return cleaned_text

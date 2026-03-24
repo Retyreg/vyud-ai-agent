@@ -8,6 +8,7 @@ import resend
 
 from agent import VyudAgent
 from writer import VyudWriter
+from searcher import PersonSearcher
 
 load_dotenv()
 
@@ -55,6 +56,7 @@ class SendEmailRequest(BaseModel):
 # Инициализация сервисов
 agent = VyudAgent()
 writer = VyudWriter()
+searcher = PersonSearcher()
 
 @app.get("/")
 async def health_check():
@@ -72,18 +74,24 @@ async def analyze_company(request: AnalyzeRequest, x_api_key: str = Header(...))
         if not result:
             raise HTTPException(status_code=400, detail="Не удалось получить данные с сайта.")
         
-        # 2. Подготовка информации об ЛПР (для MVP - умная ссылка на поиск)
-        # В следующей итерации сюда добавится реальный поиск через Serper API
-        dm_info = DecisionMaker(
-            name="Коллега",
-            title=request.target_role,
-            linkedin_url=f"https://www.linkedin.com/search/results/people/?keywords={request.target_role.replace(' ', '%20')}%20{result.company_name.replace(' ', '%20')}",
-            relevance_reason=f"Отвечает за направление {request.target_role} в компании {result.company_name}"
-        )
+        # 2. Реальный поиск ЛПР через Serper API
+        real_dm = searcher.find_decision_maker(result.company_name, request.target_role)
         
-        # 3. Генерация письма через VyudWriter с учетом роли
+        if real_dm:
+            dm_info = DecisionMaker(**real_dm)
+        else:
+            # Fallback к умной ссылке, если поиск не дал результатов
+            dm_info = DecisionMaker(
+                name="Коллега",
+                title=request.target_role,
+                linkedin_url=f"https://www.linkedin.com/search/results/people/?keywords={request.target_role.replace(' ', '%20')}%20{result.company_name.replace(' ', '%20')}",
+                relevance_reason=f"Ручной поиск в LinkedIn по запросу {request.target_role}"
+            )
+        
+        # 3. Генерация письма через VyudWriter с учетом реального имени ЛПР
         enrichment_data = result.model_dump()
         enrichment_data["target_role"] = request.target_role
+        enrichment_data["dm_name"] = dm_info.name
         
         email_draft = writer.generate_email(enrichment_data)
         
