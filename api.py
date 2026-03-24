@@ -16,7 +16,6 @@ load_dotenv()
 app = FastAPI(title="VYUD AI API", version="1.0.0")
 resend.api_key = os.getenv("RESEND_API_KEY")
 
-# Настройка CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -25,13 +24,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Простая защита API ключом
 API_SECRET_KEY = os.getenv("VYUD_API_SECRET", "vyud-secret-key-2026")
 
 # Модели данных
 class AnalyzeRequest(BaseModel):
     url: str
     target_role: Optional[str] = "Decision Maker"
+    research_keywords: Optional[str] = "" # Новое поле
 
 class DecisionMaker(BaseModel):
     name: Optional[str] = "Коллега"
@@ -43,8 +42,8 @@ class DecisionMaker(BaseModel):
 class AnalyzeResponse(BaseModel):
     company_name: Optional[str]
     industry: Optional[str]
+    found_signals: List[str] # Вместо crm_detected
     tech_stack: List[str]
-    crm_detected: Optional[str]
     confidence_score: float
     analysis_log: str
     email_draft: str
@@ -71,52 +70,43 @@ async def analyze_company(request: AnalyzeRequest, x_api_key: str = Header(...))
         raise HTTPException(status_code=403, detail="Invalid API Key")
 
     try:
-        # 1. Анализ компании
-        result = agent.analyze_company(url=request.url)
+        # 1. Анализ компании с учетом ключевых слов
+        result = agent.analyze_company(url=request.url, research_keywords=request.research_keywords)
         if not result:
-            raise HTTPException(status_code=400, detail="Не удалось получить данные с сайта.")
+            raise HTTPException(status_code=400, detail="Не удалось получить данные.")
         
-        # 2. Поиск ЛПР (Гибридная стратегия)
+        # 2. Поиск ЛПР
         dm_info = None
-        
-        # Пытаемся через Apollo (точность 95%)
-        print(f"🕵️‍♂️ Пытаюсь найти человека через Apollo для {request.url}...")
         apollo_res = apollo.search_person(request.url, request.target_role)
         if apollo_res:
             dm_info = DecisionMaker(**apollo_res)
         
-        # Fallback: Умный поиск через Google + LLM
         if not dm_info:
-            print("⚠️ Apollo не нашел сотрудника. Запускаю Agentic Search...")
-            real_dm = searcher.find_decision_maker(
-                result.company_name, 
-                request.target_role, 
-                company_context=result.analysis_log
-            )
+            real_dm = searcher.find_decision_maker(result.company_name, request.target_role, company_context=result.analysis_log)
             if real_dm:
                 dm_info = DecisionMaker(**real_dm)
 
-        # Крайний случай (все сервисы провалились)
         if not dm_info:
             dm_info = DecisionMaker(
                 name="Коллега",
                 title=request.target_role,
                 linkedin_url=f"https://www.linkedin.com/search/results/people/?keywords={request.target_role.replace(' ', '%20')}%20{result.company_name.replace(' ', '%20')}",
-                relevance_reason=f"Автоматический поиск не дал результатов, воспользуйтесь ссылкой"
+                relevance_reason=f"Автоматический поиск не дал результатов"
             )
         
         # 3. Генерация письма
         enrichment_data = result.model_dump()
         enrichment_data["target_role"] = request.target_role
         enrichment_data["dm_name"] = dm_info.name
+        enrichment_data["research_keywords"] = request.research_keywords
         
         email_draft = writer.generate_email(enrichment_data)
         
         return AnalyzeResponse(
             company_name=result.company_name,
             industry=result.industry,
+            found_signals=result.found_signals,
             tech_stack=result.tech_stack,
-            crm_detected=result.crm_detected,
             confidence_score=result.confidence_score,
             analysis_log=result.analysis_log,
             email_draft=email_draft,

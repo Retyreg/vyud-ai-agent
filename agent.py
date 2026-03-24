@@ -17,15 +17,15 @@ def load_prompt() -> str:
         with open(prompt_path, "r", encoding="utf-8") as f:
             return f.read()
     except FileNotFoundError:
-        return "Ты эксперт по извлечению данных. Выведи JSON с полями company_name, tech_stack, crm_detected, confidence_score."
+        return "Ты эксперт по извлечению данных. Выведи JSON с полями company_name, tech_stack, found_signals, confidence_score."
 
 # 2. Pydantic Модель (наша строгая схема данных)
 class CompanyEnrichment(BaseModel):
     analysis_log: str = Field(description="Внутренний анализ и цепочка рассуждений (Chain of Thought)")
     company_name: Optional[str] = Field(None, description="Название компании")
     industry: Optional[str] = Field(None, description="Отрасль")
+    found_signals: list[str] = Field(default_factory=list, description="Сигналы, найденные по запросу пользователя")
     tech_stack: list[str] = Field(default_factory=list, description="Список технологий")
-    crm_detected: Optional[str] = Field(None, description="Найденная CRM")
     personalization_hooks: list[str] = Field(default_factory=list, description="Зацепки для письма")
     confidence_score: float = Field(description="Уверенность от 0.0 до 1.0")
 
@@ -39,112 +39,51 @@ class CompanyEnrichment(BaseModel):
 # 3. Основной класс Агента
 class VyudAgent:
     def __init__(self, api_key: str = None):
-        """
-        Инициализируем агента. Ключ API берем из аргументов или переменных окружения.
-        """
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         if not self.api_key:
-            raise ValueError("OPENAI_API_KEY не найден. Передайте его в конструктор или задайте в .env")
+            raise ValueError("OPENAI_API_KEY не найден")
         
         self.client = OpenAI(api_key=self.api_key)
         self.system_prompt = load_prompt()
         self.scraper = WebScraper()
 
     def _parse_llm_json(self, llm_response: str) -> Optional[CompanyEnrichment]:
-        """
-        Безопасно извлекает JSON из ответа модели и валидирует через Pydantic.
-        """
         try:
             start_idx = llm_response.find('{')
             end_idx = llm_response.rfind('}')
-            
-            if start_idx == -1 or end_idx == -1:
-                print("❌ Ошибка: LLM не вернула JSON.")
-                return None
-                
+            if start_idx == -1 or end_idx == -1: return None
             json_str = llm_response[start_idx:end_idx+1]
-            
-            # Пробуем ast (для одинарных кавычек), затем стандартный json
             try:
                 extracted_dict = ast.literal_eval(json_str)
-            except (ValueError, SyntaxError):
+            except:
                 extracted_dict = json.loads(json_str)
-
-            # Валидация Pydantic
             return CompanyEnrichment(**extracted_dict)
-            
-        except ValidationError as e:
-            print("\n❌ Ошибка валидации данных (Pydantic):")
-            for error in e.errors():
-                print(f"- Поле {error['loc'][0]}: {error['msg']}")
-            return None
         except Exception as e:
-            print(f"\n❌ Ошибка парсинга: {str(e)}")
+            print(f"❌ Ошибка парсинга JSON: {e}")
             return None
 
-    def analyze_company(self, text: str = None, url: str = None) -> Optional[CompanyEnrichment]:
-        """
-        Отправляет текст в OpenAI и возвращает структурированный объект.
-        Можно передать либо готовый текст (text), либо ссылку на сайт (url).
-        """
+    def analyze_company(self, text: str = None, url: str = None, research_keywords: str = "") -> Optional[CompanyEnrichment]:
         if url:
-            print(f"🕵️‍♂️ Извлекаем данные с сайта: {url}")
             text = self.scraper.scrape_url(url)
-            if not text:
-                print("❌ Не удалось получить текст с сайта.")
-                return None
-                
-        if not text:
-            print("❌ Ошибка: Не передан ни текст, ни URL.")
-            return None
+            if not text: return None
+        if not text: return None
             
-        print(f"🔍 Анализирую текст ({len(text)} символов)...")
+        print(f"🔍 Анализ с фокусом на: {research_keywords}")
         
         try:
+            user_content = f"Проанализируй этот текст со страницы 'About Us':\n\n{text}"
+            if research_keywords:
+                user_content += f"\n\nОСОБЫЙ ФОКУС (найди информацию по этим темам): {research_keywords}"
+
             response = self.client.chat.completions.create(
-                model="gpt-4o-mini", # Используем быструю и дешевую модель для MVP
+                model="gpt-4o-mini",
                 messages=[
                     {"role": "system", "content": self.system_prompt},
-                    {"role": "user", "content": f"Проанализируй этот текст со страницы 'About Us':\n\n{text}"}
+                    {"role": "user", "content": user_content}
                 ],
-                temperature=0.1, # Низкая температура для предсказуемости
+                temperature=0.1,
             )
-            
-            llm_output = response.choices[0].message.content
-            print("✅ Ответ от LLM получен. Парсим...")
-            
-            return self._parse_llm_json(llm_output)
-
+            return self._parse_llm_json(response.choices[0].message.content)
         except Exception as e:
-            print(f"❌ Ошибка API OpenAI: {str(e)}")
+            print(f"❌ Ошибка OpenAI: {e}")
             return None
-
-# ==========================================
-# Пример использования
-# ==========================================
-if __name__ == "__main__":
-    # Для теста подставьте свой ключ сюда или в переменную окружения OPENAI_API_KEY
-    # os.environ["OPENAI_API_KEY"] = "sk-proj-..."
-    
-    try:
-        agent = VyudAgent()
-        
-        # Теперь мы можем передавать просто URL!
-        target_url = "https://www.hubspot.com/our-story"
-        result = agent.analyze_company(url=target_url)
-        
-        if result:
-            print("\n" + "="*40)
-            print("🎯 РЕЗУЛЬТАТ РАБОТЫ VYUD AGENT:")
-            print("="*40)
-            print(f"🏢 Компания: {result.company_name}")
-            print(f"💼 Отрасль: {result.industry}")
-            print(f"🛠 Стек: {', '.join(result.tech_stack)}")
-            print(f"📊 CRM: {result.crm_detected}")
-            print(f"🪝 Зацепки: {result.personalization_hooks}")
-            print(f"📈 Уверенность: {result.confidence_score}")
-            print("\n🧠 Как мыслил агент (Chain of Thought):")
-            print(result.analysis_log)
-    except ValueError as e:
-        print(f"\n⚠️ {e}")
-        print("💡 Чтобы запустить тест по-настоящему, установите OPENAI_API_KEY.")
