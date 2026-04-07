@@ -97,7 +97,7 @@ async def analyze_company(request: AnalyzeRequest, x_api_key: str = Header(...))
         # 3. Генерация письма
         enrichment_data = result.model_dump()
         enrichment_data["target_role"] = request.target_role
-        enrichment_data["dm_name"] = dm_info.name if dm_info.name else "Коллега" # В письме допустимо, но в UI покажем как есть
+        enrichment_data["dm_name"] = dm_info.name if dm_info.name else "Эксперт" # Убираем "Коллега"
         enrichment_data["research_keywords"] = request.research_keywords
         
         email_draft = writer.generate_email(enrichment_data)
